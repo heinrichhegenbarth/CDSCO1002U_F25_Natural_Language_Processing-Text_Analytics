@@ -1,12 +1,17 @@
 import asyncio
 import os
+import threading
 import time
 import csv
+import uuid
 from enum import Enum
 from typing import List, Union
 from pathlib import Path
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
+from tqdm import tqdm
+from queue import Queue
+import threading
 
 load_dotenv()
 
@@ -15,8 +20,8 @@ class LLMProvider(Enum):
     DEEPSEEK = "deepseek"
 
 class Statements:
-    def __init__(self, prompt: str, count: int = 3):
-        self.prompt = prompt
+    def __init__(self, topic: str, count: int = 3):
+        self.topic = topic
         self.count = count
         self.datasets = []
         
@@ -27,30 +32,34 @@ class Statements:
         )
 
     async def generate(self,
-                       temperature: float=1,
+                       temperature: float=1.5,
                        max_tokens: int=400,
                        provider: Union[LLMProvider, str] = LLMProvider.CHATGPT) -> List[str]:
         if isinstance(provider, str):
             provider = LLMProvider(provider.lower())
 
         client = self.gpt_client if provider == LLMProvider.CHATGPT else self.deepseek_client
-        model = "gpt-3.5-turbo" if provider == LLMProvider.CHATGPT else "deepseek-chat"
+        model = "gpt-4" if provider == LLMProvider.CHATGPT else "deepseek-reasoner"
         all_statements = []
 
         start_time = time.time()
 
-        for _ in range(self.count):
+        for _ in tqdm(range(self.count), desc=f"{model}"):
             try:
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=[
+
+                prompt = [
                         {"role": "system", "content": "You are a EU parliament representative."},
                         {"role": "user", "content": (
-                            f"Generate one unique debate contribution for the following topic: {self.prompt}. "
+                            f"[Unique ID: {str(uuid.uuid4())}]"
+                            f"Generate one unique debate contribution for the following topic: {self.topic}. "
                             "Make the statement as if you were a representative of the EU parliament. "
                             "Return only the statement without any line-shifts or additional information."
                         )}
-                    ],
+                ]
+
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=prompt,
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
@@ -60,7 +69,7 @@ class Statements:
                 
                 self.datasets.extend([
                     {
-                        'prompt': self.prompt,
+                        'prompt': prompt,
                         'provider': provider.value,
                         'temperature': temperature,
                         'max_tokens': max_tokens,
@@ -99,12 +108,52 @@ class Statements:
 
 async def main():
     statements = Statements(
-        prompt="A unified EU response to unjustified US trade measures and global trade opportunities for the EU",
-        count=3
+        topic="A unified EU response to unjustified US trade measures and global trade opportunities for the EU",
+        count=10
     )
     await statements.generate(provider="chatgpt")
     await statements.generate(provider="deepseek")
     statements.save()
 
-if __name__ == "__main__":
-    asyncio.run(main())
+def call_llm(topic, temperature, max_tokens):
+
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    model = "gpt-4"
+
+    prompt = [
+        {"role": "system", "content": "You are a EU parliament representative."},
+        {"role": "user", "content": (
+            f"[Unique ID: {str(uuid.uuid4())}]"
+            f"Generate one unique debate contribution for the following topic: {topic}. "
+            "Make the statement as if you were a representative of the EU parliament. "
+            "Return only the statement without any line-shifts or additional information."
+        )}
+    ]
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=prompt,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+    content = response.choices[0].message.content.strip()
+    statements = [s.strip() for s in content.split("\n") if s.strip()]
+
+    return [
+        {
+            'prompt': prompt,
+            'temperature': temperature,
+            'max_tokens': max_tokens,
+            'statement': statement
+        }
+        for statement in statements
+    ]
+
+for _ in range(3):
+    call_llm(temperature=1.5,
+             max_tokens=400,
+             topic="A unified EU response to unjustified US trade measures and global trade opportunities for the EU")
+
+#if __name__ == "__main__":
+#    asyncio.run(main())
