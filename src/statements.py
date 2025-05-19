@@ -1,13 +1,11 @@
 import asyncio
-import time
 import os
-import json
+import time
+import csv
 from enum import Enum
-from typing import List, Dict, Optional, Union
-from datetime import datetime
-import random
+from typing import List, Union
+from pathlib import Path
 from dotenv import load_dotenv
-
 from openai import AsyncOpenAI
 
 load_dotenv()
@@ -17,96 +15,96 @@ class LLMProvider(Enum):
     DEEPSEEK = "deepseek"
 
 class Statements:
-    def __init__(self, prompt: str):
+    def __init__(self, prompt: str, count: int = 3):
         self.prompt = prompt
-        self.datasets = {}
-
+        self.count = count
+        self.datasets = []
+        
         self.gpt_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.deepseek_client = AsyncOpenAI(
+            api_key=os.getenv("DEEPSEEK_API_KEY"),
+            base_url="https://api.deepseek.com/v1"
+        )
 
-        #try:
-        #    self.deepseek_client = DeepSeekAPI(configs["deepseek_api_key"])
-        #except Exception as e:
-        #    print(e)
-        #    self.deepseek_client = None
+    async def generate(self,
+                       temperature: float=1,
+                       max_tokens: int=400,
+                       provider: Union[LLMProvider, str] = LLMProvider.CHATGPT) -> List[str]:
+        if isinstance(provider, str):
+            provider = LLMProvider(provider.lower())
 
-    async def get(self,
-                  count: int = 1,
-                  provider: Union[LLMProvider, str] = LLMProvider.CHATGPT) -> List[str]:
+        client = self.gpt_client if provider == LLMProvider.CHATGPT else self.deepseek_client
+        model = "gpt-3.5-turbo" if provider == LLMProvider.CHATGPT else "deepseek-chat"
+        all_statements = []
 
-        for i in range(0, 1):
+        start_time = time.time()
 
-            if isinstance(provider, str):
-                provider = LLMProvider(provider.lower())
-
-            temperature = round(random.uniform(0.5, 0.9), 2)
-            max_tokens = random.randint(200, 500)
-
-            formatted_prompt = \
-                f"""
-                Generate a unique debate contributions for the following topic: {self.prompt}.
-                Make each statement as if you where a representative of the EU parliament.
-                Return only the statements, one per line.
-                """
-
+        for _ in range(self.count):
             try:
-                statements = await self._generate_statements(formatted_prompt, temperature, max_tokens, provider)
-
-                self.datasets[f'instance_{i}'] = {
-                    'timestamp': datetime.now().isoformat(),
-                    'prompt': self.prompt,
-                    'provider': provider.value,
-                    'temperature': temperature,
-                    'max_tokens': max_tokens,
-                    'statements': statements,
-                    'count_requested': count,
-                    'count_generated': len(statements)
-                }
-
-                return statements
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": "You are a EU parliament representative."},
+                        {"role": "user", "content": (
+                            f"Generate one unique debate contribution for the following topic: {self.prompt}. "
+                            "Make the statement as if you were a representative of the EU parliament. "
+                            "Return only the statement without any line-shifts or additional information."
+                        )}
+                    ],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                
+                content = response.choices[0].message.content.strip()
+                statements = [s.strip() for s in content.split("\n") if s.strip()]
+                
+                self.datasets.extend([
+                    {
+                        'prompt': self.prompt,
+                        'provider': provider.value,
+                        'temperature': temperature,
+                        'max_tokens': max_tokens,
+                        'statement': statement
+                    } 
+                    for statement in statements
+                ])
+                all_statements.extend(statements)
+                
             except Exception as e:
-                raise Exception(f"Error generating statements: {str(e)}")
-        return None
+                print(f"Error generating statement: {str(e)}")
 
-    def save_statements(self):
+        end_time = time.time()
+        print(f"Duration {model}: {end_time - start_time:.4f} seconds")
+
+        return all_statements
+
+    def save(self, filename: str = "statements.csv") -> None:
+        if not self.datasets:
+            print("No statements to save")
+            return
+
         try:
-            for name, dataset in self.datasets.items():
-                with open(f'{name}.json', 'w') as f:
-                    json.dump(dataset, f, indent=2)
+            path = Path(filename)
+            headers = ['prompt', 'provider', 'temperature', 'max_tokens', 'statement']
+            
+            with path.open('w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=headers)
+                writer.writeheader()
+                writer.writerows(self.datasets)
+                
+            print(f"Successfully saved {len(self.datasets)} statements to {path}")
+            
         except Exception as e:
-            raise Exception(f"Error saving dataset: {str(e)}")
+            raise Exception(f"Error saving dataset to CSV: {str(e)}")
 
-    async def _generate_statements(self, prompt: str, temperature: float, max_tokens: int, provider: LLMProvider) -> List[str]:
-
-        try:
-
-            if provider == LLMProvider.CHATGPT:
-                client = self.gpt_client
-                model = "gpt-3.5-turbo"
-            else:
-                client = self.deepseek_client
-                model = "deepseek-chat"
-
-            messages = [
-                {"role": "system", "content": "You are a helpful assistant"},
-                {"role": "user", "content": prompt}
-            ]
-
-            response = await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-
-            statements = response.choices[0].message.content.strip().split("\n")
-            return [s.strip() for s in statements if s.strip()]
-
-        except Exception as e:
-            raise Exception(f"{provider.value.title()} API error: {str(e)}")
+async def main():
+    statements = Statements(
+        prompt="A unified EU response to unjustified US trade measures and global trade opportunities for the EU",
+        count=3
+    )
+    await statements.generate(provider="chatgpt")
+    await statements.generate(provider="deepseek")
+    statements.save()
 
 if __name__ == "__main__":
-    gen = Statements(
-        prompt="A unified EU response to unjustified US trade measures and global trade opportunities for the EU",
-    )
-    asyncio.run(gen.get(count=3, provider="chatgpt"))
-    gen.save_statements()
+    asyncio.run(main())
