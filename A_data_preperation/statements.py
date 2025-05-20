@@ -1,7 +1,5 @@
 import asyncio
 import os
-import threading
-import time
 import csv
 import uuid
 from enum import Enum
@@ -10,8 +8,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from tqdm import tqdm
-from queue import Queue
-import threading
 
 load_dotenv()
 
@@ -24,7 +20,10 @@ class Statements:
         self.topic = topic
         self.count = count
         self.datasets = []
-        
+
+        self.request_count = {'count': 0}
+        self.rate_limit_lock = asyncio.Lock()
+
         self.gpt_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self.deepseek_client = AsyncOpenAI(
             api_key=os.getenv("DEEPSEEK_API_KEY"),
@@ -32,7 +31,8 @@ class Statements:
         )
 
     async def generate(self,
-                       temperature: float=1.5,
+                       temperature: float=1,
+                       top_p: float=0.9,
                        max_tokens: int=400,
                        provider: Union[LLMProvider, str] = LLMProvider.CHATGPT) -> List[str]:
         if isinstance(provider, str):
@@ -42,18 +42,17 @@ class Statements:
         model = "gpt-4" if provider == LLMProvider.CHATGPT else "deepseek-reasoner"
         all_statements = []
 
-        start_time = time.time()
-
-        for _ in tqdm(range(self.count), desc=f"{model}"):
+        async def generate_single_statement():
             try:
+
+                await self.rate_limit(self.request_count, self.rate_limit_lock)
 
                 prompt = [
                         {"role": "system", "content": "You are a EU parliament representative."},
                         {"role": "user", "content": (
-                            f"[Unique ID: {str(uuid.uuid4())}]"
+                            f"[Unique ID: {str(uuid.uuid4())}] "
                             f"Generate one unique debate contribution for the following topic: {self.topic}. "
-                            "Make the statement as if you were a representative of the EU parliament. "
-                            "Return only the statement without any line-shifts or additional information."
+                            "Return only the statement without any line-shifts, special signs or additional information."
                         )}
                 ]
 
@@ -61,6 +60,7 @@ class Statements:
                     model=model,
                     messages=prompt,
                     temperature=temperature,
+                    top_p=top_p,
                     max_tokens=max_tokens,
                 )
                 
@@ -72,18 +72,21 @@ class Statements:
                         'prompt': prompt,
                         'provider': provider.value,
                         'temperature': temperature,
+                        'top_p': top_p,
                         'max_tokens': max_tokens,
                         'statement': statement
                     } 
                     for statement in statements
                 ])
-                all_statements.extend(statements)
+                return statements
                 
             except Exception as e:
                 print(f"Error generating statement: {str(e)}")
+                return []
 
-        end_time = time.time()
-        print(f"Duration {model}: {end_time - start_time:.4f} seconds")
+        tasks = [generate_single_statement() for _ in range(self.count)]
+        for result in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc=f'{model}'):
+            all_statements.extend(await result)
 
         return all_statements
 
@@ -91,69 +94,35 @@ class Statements:
         if not self.datasets:
             print("No statements to save")
             return
-
         try:
             path = Path(filename)
-            headers = ['prompt', 'provider', 'temperature', 'max_tokens', 'statement']
-            
-            with path.open('w', newline='', encoding='utf-8') as f:
+            headers = ['prompt', 'provider', 'temperature', 'top_p', 'max_tokens', 'statement']
+            with path.open('a', newline='', encoding='utf-8') as f:
                 writer = csv.DictWriter(f, fieldnames=headers)
-                writer.writeheader()
+                if not path.exists():
+                    writer.writeheader()
                 writer.writerows(self.datasets)
-                
-            print(f"Successfully saved {len(self.datasets)} statements to {path}")
-            
         except Exception as e:
             raise Exception(f"Error saving dataset to CSV: {str(e)}")
 
+    @staticmethod
+    async def rate_limit(request_count: dict, lock: asyncio.Lock, max_requests: int = 25, pause_duration: int = 60):
+        async with lock:
+            if request_count['count'] >= max_requests:
+                await asyncio.sleep(pause_duration)
+                request_count['count'] = 0
+            await asyncio.sleep(1)
+            request_count['count'] += 1
+
+
 async def main():
     statements = Statements(
-        topic="A unified EU response to unjustified US trade measures and global trade opportunities for the EU",
+        topic="A EU response to the 2025 Trump administrations trade measures, and global trade opportunities for the EU",
         count=10
     )
     await statements.generate(provider="chatgpt")
     await statements.generate(provider="deepseek")
     statements.save()
 
-def call_llm(topic, temperature, max_tokens):
-
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    model = "gpt-4"
-
-    prompt = [
-        {"role": "system", "content": "You are a EU parliament representative."},
-        {"role": "user", "content": (
-            f"[Unique ID: {str(uuid.uuid4())}]"
-            f"Generate one unique debate contribution for the following topic: {topic}. "
-            "Make the statement as if you were a representative of the EU parliament. "
-            "Return only the statement without any line-shifts or additional information."
-        )}
-    ]
-
-    response = client.chat.completions.create(
-        model=model,
-        messages=prompt,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
-
-    content = response.choices[0].message.content.strip()
-    statements = [s.strip() for s in content.split("\n") if s.strip()]
-
-    return [
-        {
-            'prompt': prompt,
-            'temperature': temperature,
-            'max_tokens': max_tokens,
-            'statement': statement
-        }
-        for statement in statements
-    ]
-
-for _ in range(3):
-    call_llm(temperature=1.5,
-             max_tokens=400,
-             topic="A unified EU response to unjustified US trade measures and global trade opportunities for the EU")
-
-#if __name__ == "__main__":
-#    asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
