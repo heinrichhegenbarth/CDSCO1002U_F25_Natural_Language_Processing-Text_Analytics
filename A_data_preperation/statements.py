@@ -106,12 +106,12 @@ class Statements:
             raise Exception(f"Error saving dataset to CSV: {str(e)}")
 
     @staticmethod
-    async def rate_limit(request_count: dict, lock: asyncio.Lock, max_requests: int = 25, pause_duration: int = 60):
+    async def rate_limit(request_count: dict, lock: asyncio.Lock, max_requests: int = 50, pause_duration: int = 60):
         async with lock:
             if request_count['count'] >= max_requests:
                 await asyncio.sleep(pause_duration)
                 request_count['count'] = 0
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.01)
             request_count['count'] += 1
 
 
